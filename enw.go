@@ -1,53 +1,60 @@
 package enw
 
 import (
+        "fmt"
+        "os"
         "sync"
         "time"
-        "os"
 
         "github.com/joho/godotenv"
+        "gopkg.in/fsnotify.v1"
 )
-
-type Handler func(string, string)
-
-func Watch(name string, handler Handler) {
-        lock.Lock()
-
-        flock[name] = &env{
-                value: os.Getenv(name),
-                handler: handler,
-        }
-        if len(flock) == 1 {
-                start()
-        }
-
-        lock.Unlock()
-}
-
-func Forget(name string) {
-        lock.Lock()
-
-        delete(flock, name)
-        if len(flock) == 0 {
-                stop()
-        }
-
-        lock.Unlock()
-}
 
 type (
-        env struct {
-                value string
-                handler Handler
-        }
+        Handler func(string, string)
 )
 
+type env struct {
+        value string
+        handler Handler
+}
+
+type cache struct {
+        sync.Mutex
+        data map[string]*env
+}
+
 var (
-        lock sync.RWMutex
-        flock map[string]*env = map[string]*env{}
+        Frequency time.Duration = time.Second
+
+        vs cache = cache{
+                data: map[string]*env{},
+        }
 
         stopChan chan struct{}
 )
+
+func Watch(name string, handler Handler) {
+        vs.Lock()
+        vs.data[name] = &env{
+                value: os.Getenv(name),
+                handler: handler,
+        }
+        if len(vs.data) == 1 {
+                start()
+        }
+        vs.Unlock()
+}
+
+func Forget(name string) {
+        vs.Lock()
+        delete(vs.data, name)
+        if len(vs.data) == 0 {
+                stop()
+        }
+        vs.Unlock()
+}
+
 
 func start() {
         stopChan = make(chan struct{})
@@ -59,22 +66,41 @@ func stop() {
 }
 
 func watching() {
-        t := time.NewTicker(5*time.Second)
+        w, err := fsnotify.NewWatcher()
+        if err != nil {
+                panic("unable to create new watcher")
+        }
+        w.Add(".env")
+
         for {
                 select {
-                case <-t.C:
-                        godotenv.Overload()
-                        for n, e := range flock {
-                                v := os.Getenv(n)
-                                if e.value != v {
-                                        lock.Lock()
-                                        e.value = v
-                                        lock.Unlock()
-                                        e.handler(n, e.value)
-                                }
+                case event := <-w.Events:
+                        fmt.Println("event:", event)
+                        if event.Op & fsnotify.Write == fsnotify.Write {
+                                fmt.Println("modified file:", event.Name)
+                                process(event.Name)
                         }
+                case err := <-w.Errors:
+                        fmt.Println("error:", err)
                 case <-stopChan:
+                        err := w.Close()
+                        if err != nil {
+                                panic("unable to close watcher")
+                        }
                         return
                 }
         }
+}
+
+func process(filename string) {
+        godotenv.Overload(filename)
+        vs.Lock()
+        for n, e := range vs.data {
+                v := os.Getenv(n)
+                if e.value != v {
+                        e.value = v
+                        e.handler(n, e.value)
+                }
+        }
+        vs.Unlock()
 }
