@@ -1,3 +1,3 @@
 # enw
 
-Watcher for environment variables that have defined using dotenv
+Watcher for environment variables that have been defined using dotenv
